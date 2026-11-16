@@ -1412,10 +1412,39 @@ fu_genesys_usbhub_device_dump_firmware(FuDevice *device, FuProgress *progress, G
 }
 
 static gboolean
+fu_genesys_usbhub_device_ensure_hid_proxy(FuGenesysUsbhubDevice *self, GError **error)
+{
+	g_autoptr(FuDevice) device_child = NULL;
+	g_autoptr(FuDevice) device_usbhub = NULL;
+
+	device_child = fu_device_get_backend_child(FU_DEVICE(self), "usb:usb_device", error);
+	if (device_child == NULL)
+		return FALSE;
+	device_usbhub =
+	    fu_device_incorporate_from_donor(FU_TYPE_GENESYS_HUBHID_DEVICE, device_child, error);
+	if (device_usbhub == NULL)
+		return FALSE;
+
+	/* probe this "early" so that we can be sure this is our HID proxy */
+	if (!fu_device_probe(device_usbhub, error))
+		return FALSE;
+
+	/* align usb max length(0xffff) to usb2 packet size(0x40) */
+	fu_genesys_usbhub_device_set_flash_rw_size(self, 0xffc0);
+	fu_device_set_proxy(FU_DEVICE(self), device_usbhub);
+	fu_device_set_target(device_usbhub, FU_DEVICE(self));
+
+	/* okay for the next *time* we open, but we've already chosen the path now */
+	fu_device_add_private_flag(FU_DEVICE(self), FU_DEVICE_PRIVATE_FLAG_USE_PROXY_FOR_OPEN);
+
+	/* success */
+	return TRUE;
+}
+
+static gboolean
 fu_genesys_usbhub_device_probe(FuDevice *device, GError **error)
 {
 	FuGenesysUsbhubDevice *self = FU_GENESYS_USBHUB_DEVICE(device);
-	g_autoptr(FuDevice) device_child = NULL;
 	g_autoptr(GError) error_local = NULL;
 
 	if (fu_usb_device_get_class(FU_USB_DEVICE(device)) != FU_USB_CLASS_HUB) {
@@ -1441,27 +1470,8 @@ fu_genesys_usbhub_device_probe(FuDevice *device, GError **error)
 	}
 
 	/* can we find a HID proxy to use? */
-	device_child = fu_device_get_backend_child(device, "usb:usb_device", &error_local);
-	if (device_child == NULL) {
-		g_debug("no child: %s", error_local->message);
-	} else {
-		g_autoptr(FuDevice) device_usbhub = NULL;
-
-		device_usbhub = fu_device_incorporate_from_donor(FU_TYPE_GENESYS_HUBHID_DEVICE,
-								 device_child,
-								 error);
-		if (device_usbhub == NULL)
-			return FALSE;
-
-		/* align usb max length(0xffff) to usb2 packet size(0x40) */
-		fu_genesys_usbhub_device_set_flash_rw_size(self, 0xffc0);
-		fu_device_set_proxy(FU_DEVICE(self), device_usbhub);
-		fu_device_set_target(device_usbhub, FU_DEVICE(self));
-
-		/* okay for the next *time* we open, but we've already chosen the path now */
-		fu_device_add_private_flag(FU_DEVICE(self),
-					   FU_DEVICE_PRIVATE_FLAG_USE_PROXY_FOR_OPEN);
-	}
+	if (!fu_genesys_usbhub_device_ensure_hid_proxy(self, &error_local))
+		g_debug("no suitable HID proxy: %s", error_local->message);
 
 	/* success */
 	return TRUE;
